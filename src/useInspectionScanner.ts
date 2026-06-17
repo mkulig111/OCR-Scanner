@@ -1,6 +1,6 @@
 // useInspectionScanner.ts
 // Orchestrates the full offline pipeline:
-//   photo -> OCR -> field extraction -> validation -> local SQLite save.
+//   photo -> OCR -> field extraction -> validation -> local IndexedDB save.
 // Returns the parsed record so the UI can show a confirm screen BEFORE saving
 // (recommended for handwriting, where the operator should verify low-confidence
 // fields).
@@ -16,12 +16,28 @@ import type {
   FieldResult,
 } from './types';
 
-// Lightweight uuid; swap for `react-native-uuid` if you prefer.
 function uuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
+  });
+}
+
+/** Resolve the pixel dimensions of an image blob via a throwaway <img>. */
+function getImageSize(blob: Blob): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('failed to read image dimensions'));
+    };
+    img.src = url;
   });
 }
 
@@ -52,10 +68,11 @@ export function useInspectionScanner(
 
   /** Process a captured photo into a draft record (NOT yet saved). */
   const process = useCallback(
-    async (imageUri: string, imageWidth: number, imageHeight: number) => {
+    async (imageBlob: Blob) => {
       setState((s) => ({ ...s, busy: true, error: null }));
       try {
-        const ocr = await runOcr(imageUri, imageWidth, imageHeight);
+        const { width, height } = await getImageSize(imageBlob);
+        const ocr = await runOcr(imageBlob, width, height);
         const { fields } = extractFields(template, ocr);
 
         // Apply optional spec-range checks on top of type validation.
@@ -73,7 +90,7 @@ export function useInspectionScanner(
           capturedAt: new Date().toISOString(),
           fields: checked,
           rawText: ocr.rawText,
-          imageUri,
+          imageUri: URL.createObjectURL(imageBlob),
           synced: false,
         };
         setState({ busy: false, record, error: null });

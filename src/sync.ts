@@ -1,10 +1,7 @@
 // sync.ts
 // The ONLY part that touches the network. Pushes unsynced records to your
 // server when a connection is available; marks them synced on success.
-//
-// install: npx expo install @react-native-community/netinfo
 
-import NetInfo from '@react-native-community/netinfo';
 import { getUnsynced, markSynced } from './storage';
 import type { InspectionRecord } from './types';
 
@@ -20,17 +17,16 @@ export interface SyncResult {
   skipped: 'offline' | null;
 }
 
-async function isOnline(): Promise<boolean> {
-  const state = await NetInfo.fetch();
-  return Boolean(state.isConnected && state.isInternetReachable !== false);
+function isOnline(): boolean {
+  return navigator.onLine;
 }
 
 /**
- * Push pending records. Safe to call on app foreground, on a timer, or when
- * NetInfo reports connectivity returns. No-op when offline.
+ * Push pending records. Safe to call on app load, on a timer, or when the
+ * browser reports connectivity returns. No-op when offline.
  */
 export async function syncPending(cfg: SyncConfig): Promise<SyncResult> {
-  if (!(await isOnline())) {
+  if (!isOnline()) {
     return { attempted: 0, succeeded: 0, skipped: 'offline' };
   }
 
@@ -69,7 +65,7 @@ async function pushBatch(cfg: SyncConfig, batch: InspectionRecord[]): Promise<bo
 
 /** Auto-flush whenever connectivity is (re)gained. Returns an unsubscribe fn. */
 export function startAutoSync(cfg: SyncConfig): () => void {
-  return NetInfo.addEventListener((state) => {
-    if (state.isConnected) void syncPending(cfg);
-  });
+  const handler = () => void syncPending(cfg);
+  window.addEventListener('online', handler);
+  return () => window.removeEventListener('online', handler);
 }

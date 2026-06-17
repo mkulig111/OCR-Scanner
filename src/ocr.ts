@@ -1,63 +1,50 @@
 // ocr.ts
-// Wraps Google ML Kit on-device text recognition and normalizes block
-// coordinates to 0..1 so downstream mapping is resolution-independent.
+// Wraps Tesseract.js (WASM, runs fully in-browser/on-device — no network
+// call is made once the language model is cached) and normalizes line
+// bounding boxes to 0..1 so downstream mapping is resolution-independent.
 //
-// install: npm i @react-native-ml-kit/text-recognition
-// ML Kit runs fully on-device. No network call is made here.
+// install: npm i tesseract.js
 
-import TextRecognition from '@react-native-ml-kit/text-recognition';
-import type { OcrBlock, OcrResult, NormalizedRect, PixelRect } from './types';
-
-function normalizeRect(r: PixelRect, w: number, h: number): NormalizedRect {
-  return {
-    x: r.x / w,
-    y: r.y / h,
-    width: r.width / w,
-    height: r.height / h,
-  };
-}
+import Tesseract from 'tesseract.js';
+import type { OcrBlock, OcrResult } from './types';
 
 /**
- * Run OCR on an image file.
+ * Run OCR on an image.
  *
- * @param imageUri  Local file URI of the captured photo (e.g. file:///...).
- * @param imageWidth  Pixel width of that image (from the camera/photo metadata).
+ * @param image  A Blob/File (e.g. a captured camera frame) or an image URL.
+ * @param imageWidth  Pixel width of that image.
  * @param imageHeight Pixel height of that image.
  *
- * The width/height are required because ML Kit returns absolute pixel frames;
- * we need the source dimensions to normalize them.
+ * Tesseract reports bounding boxes in absolute pixels; we need the source
+ * dimensions to normalize them the same way the extraction logic expects.
  */
 export async function runOcr(
-  imageUri: string,
+  image: Blob | string,
   imageWidth: number,
   imageHeight: number,
 ): Promise<OcrResult> {
-  const result = await TextRecognition.recognize(imageUri);
+  const { data } = await Tesseract.recognize(image, 'eng');
 
-  const blocks: OcrBlock[] = (result.blocks ?? []).map((b) => {
-    const frame = b.frame as PixelRect | undefined;
-    const rect: NormalizedRect = frame
-      ? normalizeRect(frame, imageWidth, imageHeight)
-      : { x: 0, y: 0, width: 0, height: 0 };
-
-    // ML Kit element-level confidence isn't always exposed; average what we can.
-    const confidences: number[] = [];
-    for (const line of b.lines ?? []) {
-      for (const el of (line as any).elements ?? []) {
-        if (typeof el.confidence === 'number') confidences.push(el.confidence);
-      }
-    }
-    const confidence =
-      confidences.length > 0
-        ? confidences.reduce((a, c) => a + c, 0) / confidences.length
-        : undefined;
-
-    return { text: (b.text ?? '').trim(), rect, confidence };
-  });
+  const blocks: OcrBlock[] = (data.lines ?? [])
+    .map((line) => {
+      const { x0, y0, x1, y1 } = line.bbox;
+      const block: OcrBlock = {
+        text: (line.text ?? '').trim(),
+        rect: {
+          x: x0 / imageWidth,
+          y: y0 / imageHeight,
+          width: (x1 - x0) / imageWidth,
+          height: (y1 - y0) / imageHeight,
+        },
+        confidence: typeof line.confidence === 'number' ? line.confidence / 100 : undefined,
+      };
+      return block;
+    })
+    .filter((b) => b.text.length > 0);
 
   return {
-    rawText: result.text ?? '',
-    blocks: blocks.filter((b) => b.text.length > 0),
+    rawText: data.text ?? '',
+    blocks,
     imageWidth,
     imageHeight,
   };

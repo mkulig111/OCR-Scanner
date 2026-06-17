@@ -1,58 +1,71 @@
 // ScanScreen.tsx
 // Minimal, unstyled scan screen: capture -> review low-confidence fields ->
 // confirm. Style it to taste; the logic is what matters here.
-//
-// install: npx expo install react-native-vision-camera
-// (and configure camera permissions per the vision-camera docs)
+// Uses the browser's getUserMedia camera API + a canvas to grab a frame.
 
-import React, { useRef, useState } from 'react';
-import { View, Text, TextInput, Pressable, ScrollView } from 'react-native';
-import {
-  Camera,
-  useCameraDevice,
-  useCameraPermission,
-} from 'react-native-vision-camera';
+import React, { useEffect, useRef, useState } from 'react';
 import { useInspectionScanner, needsReview } from './useInspectionScanner';
 import { TIME_CHECK_SHEET, TIME_CHECK_LIMITS } from './template';
 import type { InspectionRecord, FieldResult } from './types';
 
 export default function ScanScreen() {
-  const device = useCameraDevice('back');
-  const { hasPermission, requestPermission } = useCameraPermission();
-  const camera = useRef<Camera>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [draft, setDraft] = useState<InspectionRecord | null>(null);
 
-  const { busy, process, commit } = useInspectionScanner(
+  const { busy, error, process, commit } = useInspectionScanner(
     TIME_CHECK_SHEET,
     TIME_CHECK_LIMITS,
   );
 
-  if (!hasPermission) {
+  useEffect(() => {
+    if (draft) return; // camera not needed on the review screen
+    let stream: MediaStream | null = null;
+
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: 'environment' } })
+      .then((s) => {
+        stream = s;
+        if (videoRef.current) videoRef.current.srcObject = s;
+      })
+      .catch((e) => setCameraError(e instanceof Error ? e.message : 'camera access denied'));
+
+    return () => stream?.getTracks().forEach((t) => t.stop());
+  }, [draft]);
+
+  const capture = async () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const blob: Blob | null = await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b), 'image/png'),
+    );
+    if (!blob) return;
+
+    const rec = await process(blob);
+    if (rec) setDraft(rec);
+  };
+
+  if (cameraError) {
     return (
       <Centered>
-        <Pressable onPress={requestPermission}>
-          <Text>Grant camera access</Text>
-        </Pressable>
+        <p>Camera error: {cameraError}</p>
       </Centered>
     );
   }
-  if (!device) return <Centered><Text>No camera device</Text></Centered>;
-
-  const capture = async () => {
-    const photo = await camera.current?.takePhoto();
-    if (!photo) return;
-    const uri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
-    const rec = await process(uri, photo.width, photo.height);
-    if (rec) setDraft(rec);
-  };
 
   // Review/confirm screen
   if (draft) {
     return (
-      <ScrollView contentContainerStyle={{ padding: 16 }}>
-        <Text style={{ fontSize: 18, fontWeight: '600', marginBottom: 12 }}>
-          Verify reading
-        </Text>
+      <div style={{ padding: 16, maxWidth: 480, margin: '0 auto' }}>
+        <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12 }}>Verify reading</h2>
         {draft.fields.map((f, i) => (
           <FieldRow
             key={f.key}
@@ -64,64 +77,83 @@ export default function ScanScreen() {
             }}
           />
         ))}
-        <Pressable
+        <button
           style={btn}
-          onPress={async () => { await commit(draft); setDraft(null); }}
+          onClick={async () => {
+            await commit(draft);
+            setDraft(null);
+          }}
         >
-          <Text style={{ color: 'white' }}>Save record</Text>
-        </Pressable>
-        <Pressable style={[btn, { backgroundColor: '#888' }]} onPress={() => setDraft(null)}>
-          <Text style={{ color: 'white' }}>Retake</Text>
-        </Pressable>
-      </ScrollView>
+          Save record
+        </button>
+        <button style={{ ...btn, backgroundColor: '#888' }} onClick={() => setDraft(null)}>
+          Retake
+        </button>
+        {error ? <p style={{ color: '#c0392b' }}>{error}</p> : null}
+      </div>
     );
   }
 
   // Camera screen
   return (
-    <View style={{ flex: 1 }}>
-      <Camera ref={camera} style={{ flex: 1 }} device={device} isActive photo />
-      <Pressable style={[btn, { position: 'absolute', bottom: 40, alignSelf: 'center' }]}
-                 onPress={capture} disabled={busy}>
-        <Text style={{ color: 'white' }}>{busy ? 'Reading…' : 'Capture'}</Text>
-      </Pressable>
-    </View>
+    <div style={{ position: 'relative', maxWidth: 480, margin: '0 auto' }}>
+      <video ref={videoRef} autoPlay playsInline style={{ width: '100%' }} />
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+      <button
+        style={{ ...btn, position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)' }}
+        onClick={capture}
+        disabled={busy}
+      >
+        {busy ? 'Reading…' : 'Capture'}
+      </button>
+    </div>
   );
 }
 
-function FieldRow({ field, onChange }:
-  { field: FieldResult; onChange: (v: string) => void }) {
+function FieldRow({ field, onChange }: { field: FieldResult; onChange: (v: string) => void }) {
   const flag = needsReview(field);
   return (
-    <View style={{ marginBottom: 10 }}>
-      <Text style={{ fontSize: 12, color: flag ? '#c0392b' : '#555' }}>
-        {field.key}{flag ? '  ⚠ check' : ''}
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 12, color: flag ? '#c0392b' : '#555' }}>
+        {field.key}
+        {flag ? '  ⚠ check' : ''}
         {field.confidence != null ? `  (${Math.round(field.confidence * 100)}%)` : ''}
-      </Text>
-      <TextInput
+      </div>
+      <input
         value={field.value ?? ''}
-        onChangeText={onChange}
+        onChange={(e) => onChange(e.target.value)}
         style={{
+          width: '100%',
+          boxSizing: 'border-box',
           borderWidth: 1,
+          borderStyle: 'solid',
           borderColor: flag ? '#c0392b' : '#ccc',
           borderRadius: 6,
           padding: 8,
         }}
       />
-      {field.issue ? <Text style={{ color: '#c0392b', fontSize: 11 }}>{field.issue}</Text> : null}
-    </View>
+      {field.issue ? <div style={{ color: '#c0392b', fontSize: 11 }}>{field.issue}</div> : null}
+    </div>
   );
 }
 
 const Centered = ({ children }: { children: React.ReactNode }) => (
-  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>{children}</View>
+  <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center' }}>
+    {children}
+  </div>
 );
 
-const btn = {
+const btn: React.CSSProperties = {
   backgroundColor: '#2563eb',
-  paddingVertical: 12,
-  paddingHorizontal: 20,
+  color: 'white',
+  border: 'none',
+  paddingTop: 12,
+  paddingBottom: 12,
+  paddingLeft: 20,
+  paddingRight: 20,
   borderRadius: 8,
-  alignItems: 'center' as const,
   marginTop: 8,
+  display: 'block',
+  width: '100%',
+  cursor: 'pointer',
 };
