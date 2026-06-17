@@ -1,0 +1,14 @@
+{
+  "name": "ocr-scanner",
+  "version": "0.1.0",
+  "description": "Offline-first OCR pipeline for quality-inspection sheets (React Native, on-device ML Kit).",
+  "license": "MIT",
+  "peerDependencies": {
+    "@react-native-community/netinfo": "*",
+    "@react-native-ml-kit/text-recognition": "*",
+    "expo-sqlite": "*",
+    "react": "*",
+    "react-native": "*",
+    "react-native-vision-camera": "*"
+  }
+}
